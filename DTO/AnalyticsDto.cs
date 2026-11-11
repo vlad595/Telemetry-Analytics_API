@@ -68,4 +68,13 @@ namespace Telemetry_Analytics_API.DTO
         public double HealthPercentage => TotalMeasurements == 0 ? 100 : 
             100.0 - ((double)OverloadedMeasurements / TotalMeasurements * 100.0);
     }
+
+    public class MetricTimelinePointDto
+    {
+        public DateTime Period { get; set; }
+        public double CpuUsage { get; set; }
+        public double MemoryUsage { get; set; }
+        public double NetworkRxMegabytes { get; set; }
+        public double NetworkTxMegabytes { get; set; }
+    }
 }
