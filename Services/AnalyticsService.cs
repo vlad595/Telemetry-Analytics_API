@@ -7,13 +7,13 @@ namespace Telemetry_Analytics_API.Services
 {
     public interface IAnalyticsService
     {
-        Task<IEnumerable<dynamic>> BuildCustomAnalyticsAsync(DynamicAnalyticsRequest request);
+        Task<IEnumerable<dynamic>> BuildCustomAnalyticsAsync(DynamicAnalyticsRequest request, DateTime from, DateTime to);
 
-        Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, int daysAgo);
-        Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, int hoursAgo);
-        Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, int hoursAgo);
-        Task<DiskConsumptionDto?> GetDiskConsumptionRateAsync(Guid agentId, int daysAgo);
-        Task<HealthScoreDto?> GetSystemHealthScoreAsync(Guid agentId, int hoursAgo);
+        Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to);
+        Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, DateTime from, DateTime to);
+        Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, DateTime from, DateTime to);
+        Task<DiskConsumptionDto?> GetDiskConsumptionRateAsync(Guid agentId, DateTime from, DateTime to);
+        Task<HealthScoreDto?> GetSystemHealthScoreAsync(Guid agentId, DateTime from, DateTime to);
         Task<IEnumerable<MetricTimelinePointDto>> GetMetricTimelineAsync(Guid agentId, int hoursAgo, int intervalMinutes);
         Task<MetricSnapshotDto?> GetMetricSnapshotAsync(Guid agentId, DateTime at, int maxHistoryHours);
         Task<MetricTimeRangeDto?> GetMetricTimeRangeAsync(Guid agentId, int maxHistoryHours);
@@ -33,7 +33,7 @@ namespace Telemetry_Analytics_API.Services
                 ?? throw new InvalidOperationException("ClickHouse ConnectionString is missing");
         }
 
-        public async Task<IEnumerable<dynamic>> BuildCustomAnalyticsAsync(DynamicAnalyticsRequest request)
+        public async Task<IEnumerable<dynamic>> BuildCustomAnalyticsAsync(DynamicAnalyticsRequest request, DateTime from, DateTime to)
         {
             if (request.Rules == null || !request.Rules.Any())
                 throw new ArgumentException("Must provide at least one rule");
@@ -77,17 +77,16 @@ namespace Telemetry_Analytics_API.Services
                     toStartOfInterval(Timestamp, {intervalSql}) AS Period,
                     {string.Join(",\n                    ", selectClauses)}
                 FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To
                 GROUP BY Period
                 ORDER BY Period";
 
             using var connection = new ClickHouseConnection(_connectionString);
             
-            var from = DateTime.UtcNow.AddHours(-request.HoursAgo);
-            return await connection.QueryAsync<dynamic>(query, new { request.AgentId, From = from });
+            return await connection.QueryAsync<dynamic>(query, new { request.AgentId, From = from, To = to });
         }
         
-        public async Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, int daysAgo)
+        public async Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to)
         {
             var query = @"
                 SELECT 
@@ -95,15 +94,15 @@ namespace Telemetry_Analytics_API.Services
                     quantile(0.95)(CpuUsage) AS P95Cpu,
                     quantile(0.95)(MemoryUsage) AS P95Memory
                 FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To
                 GROUP BY Period
                 ORDER BY Period";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryAsync<DailyPeakDto>(query, new { AgentId = agentId, From = DateTime.UtcNow.AddDays(-daysAgo) });
+            return await connection.QueryAsync<DailyPeakDto>(query, new { AgentId = agentId, From = from, To = to });
         }
 
-        public async Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, int hoursAgo)
+        public async Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, DateTime from, DateTime to)
         {
             var query = @"
                 SELECT 
@@ -111,15 +110,15 @@ namespace Telemetry_Analytics_API.Services
                     SUM(NetworkRxBytes) / 1048576.0 AS TotalRxMegabytes,
                     SUM(NetworkTxBytes) / 1048576.0 AS TotalTxMegabytes
                 FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To
                 GROUP BY Period
                 ORDER BY Period";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryAsync<NetworkTrendDto>(query, new { AgentId = agentId, From = DateTime.UtcNow.AddHours(-hoursAgo) });
+            return await connection.QueryAsync<NetworkTrendDto>(query, new { AgentId = agentId, From = from, To = to });
         }
 
-        public async Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, int hoursAgo)
+        public async Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, DateTime from, DateTime to)
         {
             var query = @"
                 SELECT 
@@ -129,38 +128,39 @@ namespace Telemetry_Analytics_API.Services
                 FROM SystemMetrics
                 WHERE AgentId = @AgentId 
                   AND Timestamp >= @From
+                  AND Timestamp <= @To
                   AND CpuUsage > 90 
                   AND MemoryUsage > 90
                 ORDER BY Timestamp DESC";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryAsync<AnomalyDto>(query, new { AgentId = agentId, From = DateTime.UtcNow.AddHours(-hoursAgo) });
+            return await connection.QueryAsync<AnomalyDto>(query, new { AgentId = agentId, From = from, To = to });
         }
 
-        public async Task<DiskConsumptionDto?> GetDiskConsumptionRateAsync(Guid agentId, int daysAgo)
+        public async Task<DiskConsumptionDto?> GetDiskConsumptionRateAsync(Guid agentId, DateTime from, DateTime to)
         {
             var query = @"
                 SELECT 
                     argMin(DiskSpace, Timestamp) AS StartDiskSpace,
                     argMax(DiskSpace, Timestamp) AS EndDiskSpace
                 FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From";
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryFirstOrDefaultAsync<DiskConsumptionDto>(query, new { AgentId = agentId, From = DateTime.UtcNow.AddDays(-daysAgo) });
+            return await connection.QueryFirstOrDefaultAsync<DiskConsumptionDto>(query, new { AgentId = agentId, From = from, To = to });
         }
 
-        public async Task<HealthScoreDto?> GetSystemHealthScoreAsync(Guid agentId, int hoursAgo)
+        public async Task<HealthScoreDto?> GetSystemHealthScoreAsync(Guid agentId, DateTime from, DateTime to)
         {
             var query = @"
                 SELECT 
                     count() AS TotalMeasurements,
                     countIf(CpuUsage > 70) AS OverloadedMeasurements
                 FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From";
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryFirstOrDefaultAsync<HealthScoreDto>(query, new { AgentId = agentId, From = DateTime.UtcNow.AddHours(-hoursAgo) });
+            return await connection.QueryFirstOrDefaultAsync<HealthScoreDto>(query, new { AgentId = agentId, From = from, To = to });
         }
 
         public async Task<IEnumerable<MetricTimelinePointDto>> GetMetricTimelineAsync(Guid agentId, int hoursAgo, int intervalMinutes)

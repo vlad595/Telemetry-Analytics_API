@@ -29,6 +29,7 @@ namespace Telemetry_Analytics_API.DTO
     {
         public Guid AgentId { get; set; }
         public int HoursAgo { get; set; }
+        public DateTimeOffset? At { get; set; }
         public TimeInterval GroupingInterval { get; set; }
         public List<CustomMetricRule> Rules { get; set; } = new();
     }

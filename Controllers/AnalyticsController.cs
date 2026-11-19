@@ -32,10 +32,12 @@ namespace Telemetry_Analytics_API.Controllers
             if (!access.Allowed) return Denied(access);
             if (request.HoursAgo <= 0 || request.HoursAgo > GetMaxHours(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxHours(access.PlanTier)} hours of history.");
+            if (!TryGetWindow(request.At, request.HoursAgo, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
 
             try
             {
-                return Ok(await _analyticsService.BuildCustomAnalyticsAsync(request));
+                return Ok(await _analyticsService.BuildCustomAnalyticsAsync(request, from, to));
             }
             catch (ArgumentException ex)
             {
@@ -50,60 +52,70 @@ namespace Telemetry_Analytics_API.Controllers
         }
 
         [HttpGet("agent/{agentId}/peaks")]
-        public async Task<IActionResult> GetDailyPeaks(Guid agentId, [FromQuery] int daysAgo = 7)
+        public async Task<IActionResult> GetDailyPeaks(Guid agentId, [FromQuery] int daysAgo = 7, [FromQuery] DateTimeOffset? at = null)
         {
             var access = await CheckAccess(agentId);
             if (!access.Allowed) return Denied(access);
             if (daysAgo <= 0 || daysAgo > GetMaxDays(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxDays(access.PlanTier)} days of history.");
 
-            return Ok(await _analyticsService.GetDailyPeakLoadsAsync(agentId, daysAgo));
+            if (!TryGetWindow(at, daysAgo * 24, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
+            return Ok(await _analyticsService.GetDailyPeakLoadsAsync(agentId, from, to));
         }
 
         [HttpGet("agent/{agentId}/network-trends")]
-        public async Task<IActionResult> GetNetworkTrends(Guid agentId, [FromQuery] int hoursAgo = 24)
+        public async Task<IActionResult> GetNetworkTrends(Guid agentId, [FromQuery] int hoursAgo = 24, [FromQuery] DateTimeOffset? at = null)
         {
             var access = await CheckAccess(agentId);
             if (!access.Allowed) return Denied(access);
             if (hoursAgo <= 0 || hoursAgo > GetMaxHours(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxHours(access.PlanTier)} hours of history.");
 
-            return Ok(await _analyticsService.GetNetworkTrafficTrendsAsync(agentId, hoursAgo));
+            if (!TryGetWindow(at, hoursAgo, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
+            return Ok(await _analyticsService.GetNetworkTrafficTrendsAsync(agentId, from, to));
         }
 
         [HttpGet("agent/{agentId}/anomalies")]
-        public async Task<IActionResult> GetCriticalAnomalies(Guid agentId, [FromQuery] int hoursAgo = 24)
+        public async Task<IActionResult> GetCriticalAnomalies(Guid agentId, [FromQuery] int hoursAgo = 24, [FromQuery] DateTimeOffset? at = null)
         {
             var access = await CheckAccess(agentId);
             if (!access.Allowed) return Denied(access);
             if (hoursAgo <= 0 || hoursAgo > GetMaxHours(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxHours(access.PlanTier)} hours of history.");
 
-            return Ok(await _analyticsService.GetCriticalAnomaliesAsync(agentId, hoursAgo));
+            if (!TryGetWindow(at, hoursAgo, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
+            return Ok(await _analyticsService.GetCriticalAnomaliesAsync(agentId, from, to));
         }
 
         [HttpGet("agent/{agentId}/disk-consumption")]
-        public async Task<IActionResult> GetDiskConsumption(Guid agentId, [FromQuery] int daysAgo = 7)
+        public async Task<IActionResult> GetDiskConsumption(Guid agentId, [FromQuery] int daysAgo = 7, [FromQuery] DateTimeOffset? at = null)
         {
             var access = await CheckAccess(agentId);
             if (!access.Allowed) return Denied(access);
             if (daysAgo <= 0 || daysAgo > GetMaxDays(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxDays(access.PlanTier)} days of history.");
 
-            var result = await _analyticsService.GetDiskConsumptionRateAsync(agentId, daysAgo);
+            if (!TryGetWindow(at, daysAgo * 24, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
+            var result = await _analyticsService.GetDiskConsumptionRateAsync(agentId, from, to);
             if (result == null || result.StartDiskSpace == 0) return NoContent();
             return Ok(result);
         }
 
         [HttpGet("agent/{agentId}/health-score")]
-        public async Task<IActionResult> GetHealthScore(Guid agentId, [FromQuery] int hoursAgo = 24)
+        public async Task<IActionResult> GetHealthScore(Guid agentId, [FromQuery] int hoursAgo = 24, [FromQuery] DateTimeOffset? at = null)
         {
             var access = await CheckAccess(agentId);
             if (!access.Allowed) return Denied(access);
             if (hoursAgo <= 0 || hoursAgo > GetMaxHours(access.PlanTier))
                 return BadRequest($"The selected plan allows up to {GetMaxHours(access.PlanTier)} hours of history.");
 
-            var result = await _analyticsService.GetSystemHealthScoreAsync(agentId, hoursAgo);
+            if (!TryGetWindow(at, hoursAgo, GetMaxHours(access.PlanTier), out var from, out var to))
+                return BadRequest("The selected timestamp is outside the available history.");
+            var result = await _analyticsService.GetSystemHealthScoreAsync(agentId, from, to);
             if (result == null || result.TotalMeasurements == 0) return NotFound("There are no measurements in the selected period.");
             return Ok(result);
         }
@@ -180,5 +192,16 @@ namespace Telemetry_Analytics_API.Controllers
         };
 
         private static int GetMaxDays(int planTier) => planTier == 1 ? 7 : planTier == 2 ? 1 : 0;
+
+        private static bool TryGetWindow(DateTimeOffset? at, int hours, int maxHistoryHours, out DateTime from, out DateTime to)
+        {
+            var now = DateTime.UtcNow;
+            var oldest = now.AddHours(-maxHistoryHours);
+            to = at?.UtcDateTime ?? now;
+            from = to.AddHours(-hours);
+            if (to < oldest || to > now.AddMinutes(1)) return false;
+            if (from < oldest) from = oldest;
+            return true;
+        }
     }
 }
