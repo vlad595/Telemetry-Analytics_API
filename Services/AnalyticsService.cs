@@ -155,7 +155,7 @@ namespace Telemetry_Analytics_API.Services
             var query = @"
                 SELECT 
                     count() AS TotalMeasurements,
-                    countIf(CpuUsage > 70) AS OverloadedMeasurements
+                    countIf(CpuUsage * 100 > 70) AS OverloadedMeasurements
                 FROM SystemMetrics
                 WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To";
 
