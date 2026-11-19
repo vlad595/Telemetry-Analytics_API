@@ -64,6 +64,22 @@ namespace Telemetry_Analytics_API.Controllers
             return Ok(await _analyticsService.GetDailyPeakLoadsAsync(agentId, from, to));
         }
 
+        [HttpGet("agent/{agentId}/previous-day-peaks")]
+        public async Task<IActionResult> GetPreviousDayPeaks(Guid agentId, [FromQuery] DateTimeOffset? at = null)
+        {
+            var access = await CheckAccess(agentId);
+            if (!access.Allowed) return Denied(access);
+
+            var now = DateTime.UtcNow;
+            var selected = at?.UtcDateTime ?? now;
+            var to = selected.Date;
+            var from = to.AddDays(-1);
+            if (selected > now.AddMinutes(1) || from < now.AddHours(-GetMaxHours(access.PlanTier)))
+                return BadRequest("The previous UTC day is outside the available history.");
+
+            return Ok(await _analyticsService.GetHourlyPeakLoadsAsync(agentId, from, to));
+        }
+
         [HttpGet("agent/{agentId}/network-trends")]
         public async Task<IActionResult> GetNetworkTrends(Guid agentId, [FromQuery] int hoursAgo = 24, [FromQuery] DateTimeOffset? at = null)
         {

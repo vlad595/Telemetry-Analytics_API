@@ -10,6 +10,7 @@ namespace Telemetry_Analytics_API.Services
         Task<IEnumerable<dynamic>> BuildCustomAnalyticsAsync(DynamicAnalyticsRequest request, DateTime from, DateTime to);
 
         Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to);
+        Task<IEnumerable<HourlyPeakDto>> GetHourlyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to);
         Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, DateTime from, DateTime to);
         Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, DateTime from, DateTime to);
         Task<DiskConsumptionDto?> GetDiskConsumptionRateAsync(Guid agentId, DateTime from, DateTime to);
@@ -100,6 +101,24 @@ namespace Telemetry_Analytics_API.Services
 
             using var connection = new ClickHouseConnection(_connectionString);
             return await connection.QueryAsync<DailyPeakDto>(query, new { AgentId = agentId, From = from, To = to });
+        }
+
+        public async Task<IEnumerable<HourlyPeakDto>> GetHourlyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to)
+        {
+            const string query = @"
+                SELECT
+                    toStartOfHour(Timestamp) AS Period,
+                    quantile(0.95)(CpuUsage) AS P95Cpu,
+                    quantile(0.95)(MemoryUsage) AS P95Memory
+                FROM SystemMetrics
+                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp < @To
+                GROUP BY Period
+                ORDER BY Period";
+
+            using var connection = new ClickHouseConnection(_connectionString);
+            var peaks = await connection.QueryAsync<HourlyPeakDto>(query, new { AgentId = agentId, From = from, To = to });
+            foreach (var peak in peaks) peak.Period = DateTime.SpecifyKind(peak.Period, DateTimeKind.Utc);
+            return peaks;
         }
 
         public async Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, DateTime from, DateTime to)

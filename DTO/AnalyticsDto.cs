@@ -41,6 +41,13 @@ namespace Telemetry_Analytics_API.DTO
         public double P95Memory { get; set; }
     }
 
+    public class HourlyPeakDto
+    {
+        public DateTime Period { get; set; }
+        public double P95Cpu { get; set; }
+        public double P95Memory { get; set; }
+    }
+
     public class NetworkTrendDto
     {
         public DateTime Period { get; set; }
