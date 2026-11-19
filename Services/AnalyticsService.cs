@@ -21,6 +21,28 @@ namespace Telemetry_Analytics_API.Services
     }
     public class AnalyticsService : IAnalyticsService
     {
+        // NetworkRxBytes and NetworkTxBytes store bytes/second, not byte counters.
+        // The collector normally samples every two seconds; cap longer gaps so an offline agent
+        // does not turn a single rate sample into traffic for the entire outage.
+        private const int MaxNetworkSampleSeconds = 10;
+        private static readonly string NetworkSamplesCte = $@"
+            WITH MetricSamples AS
+            (
+                SELECT
+                    Timestamp,
+                    CpuUsage,
+                    MemoryUsage,
+                    NetworkRxBytes,
+                    NetworkTxBytes,
+                    least(
+                        {MaxNetworkSampleSeconds * 1000},
+                        greatest(0, dateDiff('millisecond',
+                            lagInFrame(Timestamp, 1, Timestamp) OVER (ORDER BY Timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+                            Timestamp)),
+                        greatest(0, dateDiff('millisecond', @From, Timestamp))) / 1000.0 AS SampleSeconds
+                FROM SystemMetrics
+                WHERE AgentId = @AgentId AND Timestamp >= @SampleFrom AND Timestamp < @To
+            )";
         private readonly string _connectionString;
         
         private readonly HashSet<string> _allowedMetrics = new(StringComparer.OrdinalIgnoreCase) 
@@ -40,13 +62,18 @@ namespace Telemetry_Analytics_API.Services
                 throw new ArgumentException("Must provide at least one rule");
 
             var selectClauses = new List<string>();
+            var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Period" };
 
             foreach (var rule in request.Rules)
             {
                 if (!_allowedMetrics.Contains(rule.MetricName))
                     throw new ArgumentException($"Invalid metric name: {rule.MetricName}");
 
-                var alias = string.IsNullOrWhiteSpace(rule.Alias) ? $"{rule.Aggregation}_{rule.MetricName}" : rule.Alias;
+                var alias = string.IsNullOrWhiteSpace(rule.Alias) ? $"{rule.Aggregation}_{rule.MetricName}" : rule.Alias.Trim();
+                if (alias.Length > 64 || alias.Length == 0 || !IsSafeAlias(alias))
+                    throw new ArgumentException($"Invalid result alias: {alias}. Use letters, digits, and underscores; start with a letter or underscore.");
+                if (!aliases.Add(alias))
+                    throw new ArgumentException($"Duplicate or reserved result alias: {alias}.");
                 
                 string sqlFunc = rule.Aggregation switch
                 {
@@ -56,12 +83,10 @@ namespace Telemetry_Analytics_API.Services
                     AggregationType.Sum => $"SUM({rule.MetricName})",
                     AggregationType.P95 => $"quantile(0.95)({rule.MetricName})",
                     AggregationType.P99 => $"quantile(0.99)({rule.MetricName})",
-                    _ => throw new NotImplementedException()
+                    _ => throw new ArgumentException($"Invalid aggregation: {rule.Aggregation}")
                 };
 
-                var safeAlias = new string(alias.Where(char.IsLetterOrDigit).ToArray());
-                
-                selectClauses.Add($"{sqlFunc} AS {safeAlias}");
+                selectClauses.Add($"{sqlFunc} AS {alias}");
             }
 
             string intervalSql = request.GroupingInterval switch
@@ -86,6 +111,12 @@ namespace Telemetry_Analytics_API.Services
             
             return await connection.QueryAsync<dynamic>(query, new { request.AgentId, From = from, To = to });
         }
+
+        private static bool IsSafeAlias(string alias) =>
+            (IsAsciiLetter(alias[0]) || alias[0] == '_') &&
+            alias.All(c => IsAsciiLetter(c) || char.IsAsciiDigit(c) || c == '_');
+
+        private static bool IsAsciiLetter(char c) => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
         
         public async Task<IEnumerable<DailyPeakDto>> GetDailyPeakLoadsAsync(Guid agentId, DateTime from, DateTime to)
         {
@@ -123,18 +154,21 @@ namespace Telemetry_Analytics_API.Services
 
         public async Task<IEnumerable<NetworkTrendDto>> GetNetworkTrafficTrendsAsync(Guid agentId, DateTime from, DateTime to)
         {
-            var query = @"
+            var query = NetworkSamplesCte + @"
                 SELECT 
                     toStartOfInterval(Timestamp, INTERVAL 1 hour) AS Period,
-                    SUM(NetworkRxBytes) / 1048576.0 AS TotalRxMegabytes,
-                    SUM(NetworkTxBytes) / 1048576.0 AS TotalTxMegabytes
-                FROM SystemMetrics
-                WHERE AgentId = @AgentId AND Timestamp >= @From AND Timestamp <= @To
+                    sum(greatest(NetworkRxBytes, 0) * SampleSeconds) / 1048576.0 AS TotalRxMegabytes,
+                    sum(greatest(NetworkTxBytes, 0) * SampleSeconds) / 1048576.0 AS TotalTxMegabytes
+                FROM MetricSamples
+                WHERE Timestamp >= @From
                 GROUP BY Period
                 ORDER BY Period";
 
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryAsync<NetworkTrendDto>(query, new { AgentId = agentId, From = from, To = to });
+            var trends = await connection.QueryAsync<NetworkTrendDto>(query,
+                new { AgentId = agentId, From = from, SampleFrom = from.AddSeconds(-MaxNetworkSampleSeconds), To = to });
+            foreach (var trend in trends) trend.Period = DateTime.SpecifyKind(trend.Period, DateTimeKind.Utc);
+            return trends;
         }
 
         public async Task<IEnumerable<AnomalyDto>> GetCriticalAnomaliesAsync(Guid agentId, DateTime from, DateTime to)
@@ -184,24 +218,25 @@ namespace Telemetry_Analytics_API.Services
 
         public async Task<IEnumerable<MetricTimelinePointDto>> GetMetricTimelineAsync(Guid agentId, int hoursAgo, int intervalMinutes)
         {
-            var query = $@"
+            var query = NetworkSamplesCte + $@"
                 SELECT
                     toStartOfInterval(Timestamp, INTERVAL {intervalMinutes} MINUTE) AS Period,
                     avg(CpuUsage) AS CpuUsage,
                     avg(MemoryUsage) AS MemoryUsage,
-                    sum(NetworkRxBytes) / 1048576.0 AS NetworkRxMegabytes,
-                    sum(NetworkTxBytes) / 1048576.0 AS NetworkTxMegabytes
-                FROM SystemMetrics
-                WHERE AgentId = @AgentId
-                  AND Timestamp >= @From
-                  AND Timestamp <= @To
+                    sum(greatest(NetworkRxBytes, 0) * SampleSeconds) / 1048576.0 AS NetworkRxMegabytes,
+                    sum(greatest(NetworkTxBytes, 0) * SampleSeconds) / 1048576.0 AS NetworkTxMegabytes
+                FROM MetricSamples
+                WHERE Timestamp >= @From
                 GROUP BY Period
                 ORDER BY Period";
 
             DateTime to = DateTime.UtcNow;
             DateTime from = to.AddHours(-hoursAgo);
             using var connection = new ClickHouseConnection(_connectionString);
-            return await connection.QueryAsync<MetricTimelinePointDto>(query, new { AgentId = agentId, From = from, To = to });
+            var points = await connection.QueryAsync<MetricTimelinePointDto>(query,
+                new { AgentId = agentId, From = from, SampleFrom = from.AddSeconds(-MaxNetworkSampleSeconds), To = to });
+            foreach (var point in points) point.Period = DateTime.SpecifyKind(point.Period, DateTimeKind.Utc);
+            return points;
         }
 
         public async Task<MetricSnapshotDto?> GetMetricSnapshotAsync(Guid agentId, DateTime at, int maxHistoryHours)
